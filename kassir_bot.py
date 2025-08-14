@@ -268,6 +268,22 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb
     )
 
+async def safe_edit(q, text: str, **kwargs):
+    """
+    Универсальное редактирование: для медиа правит caption, для текста — text.
+    """
+    try:
+        msg = q.message
+        if getattr(msg, "photo", None) or getattr(msg, "document", None) or getattr(msg, "video", None) or getattr(msg, "video_note", None):
+            return await q.edit_message_caption(caption=text, **kwargs)
+        return await q.edit_message_text(text, **kwargs)
+    except Exception:
+        # на всякий случай: пробуем альтернативный метод
+        try:
+            return await q.edit_message_caption(caption=text, **kwargs)
+        except Exception:
+            return await q.edit_message_text(text, **kwargs)
+
 async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
@@ -376,7 +392,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"(~{TOKEN_TTL_HOURS} ч) и перестают работать после активации."
                 )
                 btns = [[InlineKeyboardButton(f"Открыть @{bn}", url=link)] for bn, link in links]
-                await q.edit_message_text(f"Заказ #{order_id}: подтверждён. Ссылки отправлены.")
+                await safe_edit(f"Заказ #{order_id}: подтверждён. Ссылки отправлены.")
                 try:
                     await ctx.bot.send_message(order["user_id"], warn, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
                 except Exception:
@@ -386,7 +402,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if data.startswith("send_invoice:"):
                 order_id = int(data.split(":", 1)[1])
                 cur.execute("UPDATE invoice_requests SET closed=FALSE WHERE order_id=%s", (order_id,))
-                await q.edit_message_text(
+                await safe_edit(
                     f"Загрузка чека для клиента по заказу #{order_id}.\n"
                     "Отправьте документ/фото в этот чат — я перешлю покупателю.\n"
                     "После отправки нажмите «Закрыть запрос».",
@@ -397,7 +413,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if data.startswith("close_invoice:"):
                 order_id = int(data.split(":", 1)[1])
                 cur.execute("UPDATE invoice_requests SET closed=TRUE WHERE order_id=%s", (order_id,))
-                await q.edit_message_text(f"Запрос на чек по заказу #{order_id} закрыт.")
+                await safe_edit(f"Запрос на чек по заказу #{order_id} закрыт.")
                 return
 
         if data.startswith("request_invoice:"):
