@@ -367,12 +367,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
                 if data.startswith("reject:"):
                     set_status(order_id, "rejected")
-                    # сообщение у админа – это медиасообщение (фото/док) → редактируем ПОДПИСЬ
-                    if q.message.photo or q.message.document:
-                        await q.edit_message_caption(caption=f"Заказ #{order_id}: отклонён.", reply_markup=None)
-                    else:
-                        await q.edit_message_text(f"Заказ #{order_id}: отклонён.", reply_markup=None)
-
+                    await safe_edit(q, f"Заказ #{order_id}: отклонён.", reply_markup=None)
                     try:
                         await ctx.bot.send_message(
                             order["user_id"],
@@ -382,33 +377,30 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         pass
                     return
 
+
                 # confirm
                 set_status(order_id, "paid")
-                prod = get_product(order["product_code"])
+                prod  = get_product(order["product_code"])
                 links = gen_tokens_with_ttl(order["user_id"], prod["targets"], TOKEN_TTL_HOURS)
+
                 warn = (
                     "✅ Чек проверен.\n\n"
                     "⚠️ Ссылки индивидуальные. Они действуют ограниченное время "
                     f"(~{TOKEN_TTL_HOURS} ч) и перестают работать после активации."
                 )
                 btns = [[InlineKeyboardButton(f"Открыть @{bn}", url=link)] for bn, link in links]
-                await safe_edit(f"Заказ #{order_id}: подтверждён. Ссылки отправлены.")
+
+                await safe_edit(q, f"Заказ #{order_id}: подтверждён. Ссылки отправлены.", reply_markup=None)
+
                 try:
-                    await ctx.bot.send_message(order["user_id"], warn, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
+                    await ctx.bot.send_message(
+                        order["user_id"], warn,
+                        reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML"
+                    )
                 except Exception:
                     pass
                 return
 
-            if data.startswith("send_invoice:"):
-                order_id = int(data.split(":", 1)[1])
-                cur.execute("UPDATE invoice_requests SET closed=FALSE WHERE order_id=%s", (order_id,))
-                await safe_edit(
-                    f"Загрузка чека для клиента по заказу #{order_id}.\n"
-                    "Отправьте документ/фото в этот чат — я перешлю покупателю.\n"
-                    "После отправки нажмите «Закрыть запрос».",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Закрыть запрос", callback_data=f"close_invoice:{order_id}")]])
-                )
-                return
 
             if data.startswith("close_invoice:"):
                 order_id = int(data.split(":", 1)[1])
