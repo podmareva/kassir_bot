@@ -351,9 +351,17 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
                 if data.startswith("reject:"):
                     set_status(order_id, "rejected")
-                    await q.edit_message_text(f"Заказ #{order_id}: отклонён.")
+                    # сообщение у админа – это медиасообщение (фото/док) → редактируем ПОДПИСЬ
+                    if q.message.photo or q.message.document:
+                        await q.edit_message_caption(caption=f"Заказ #{order_id}: отклонён.", reply_markup=None)
+                    else:
+                        await q.edit_message_text(f"Заказ #{order_id}: отклонён.", reply_markup=None)
+
                     try:
-                        await ctx.bot.send_message(order["user_id"], "❌ Оплата не подтверждена. Если это ошибка — загрузите чек ещё раз.")
+                        await ctx.bot.send_message(
+                            order["user_id"],
+                            "❌ Оплата не подтверждена. Если это ошибка — загрузите чек ещё раз."
+                        )
                     except Exception:
                         pass
                     return
