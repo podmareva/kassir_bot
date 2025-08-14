@@ -303,11 +303,10 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         if data == "consent_ok":
             set_consent(uid)
-            # если сообщение под кружком — редактировать безопасно
             await safe_edit(q, PROMO_TEXT, parse_mode="HTML")
             await ctx.bot.send_message(chat_id=uid, text="Выберите продукт для оформления заказа:", reply_markup=shop_keyboard())
             await ctx.bot.send_message(chat_id=uid, text=ABOUT_BOTS)
-            await send_examples_screens(ctx, uid)
+            # await send_examples_screens(ctx, uid)
             return
 
         if data == "upload_receipt":
