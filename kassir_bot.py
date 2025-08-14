@@ -159,7 +159,13 @@ for code, p in CATALOG.items():
 
 # -------------------- Utils --------------------
 def set_consent(user_id: int):
-    cur.execute("INSERT INTO consents(user_id, accepted_at) VALUES(%s, now()) ON CONFLICT DO NOTHING", (user_id,))
+    try:
+        cur.execute(
+            "INSERT INTO consents(user_id, accepted_at) VALUES(%s, now()) ON CONFLICT DO NOTHING",
+            (user_id,)
+        )
+    except Exception as e:
+        log.warning("Ошибка при сохранении согласия: %s", e)
 
 def get_product(code: str) -> Optional[dict]:
     cur.execute("SELECT * FROM products WHERE code=%s", (code,))
