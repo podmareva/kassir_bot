@@ -1,7 +1,7 @@
-# main_cashier_bot.py
-import os, json, secrets
+import os, json, secrets, logging
 from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import psycopg
 from psycopg.rows import dict_row
@@ -15,53 +15,63 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
+# -------------------- CONFIG / ENV --------------------
 load_dotenv()
 
-# === ENV (обязательно заполнить .env) ===
 BOT_TOKEN    = os.getenv("CASHIER_BOT_TOKEN")
 ADMIN_ID     = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Целевые боты
-BOT_UNPACK = os.getenv("BOT_UNPACK", "jtbd_assistant_bot")
-BOT_COPY   = os.getenv("BOT_COPY",   "content_helper_assist_bot")
-BOT_PHOTO  = os.getenv("BOT_PHOTO",  "AIPromoPhotoBot")
+# целевые боты (username)
+BOT_UNPACK = os.getenv("BOT_UNPACK", "jtbd_assistant_bot")              # Бот №1
+BOT_COPY   = os.getenv("BOT_COPY",   "content_helper_assist_bot")       # Бот №2
 
-# Юр-документы
+# юр-документы + инфо о разработчике (ссылки)
 POLICY_URL      = os.getenv("POLICY_URL")
 OFFER_URL       = os.getenv("OFFER_URL")
 ADS_CONSENT_URL = os.getenv("ADS_CONSENT_URL")
+DEV_INFO_URL    = os.getenv("DEV_INFO_URL")  # даём через кнопку
 
-# Оплата на карту Т-Банка
-PAY_PHONE   = os.getenv("PAY_PHONE", "+7XXXXXXXXXX")           # Номер телефона для СБП/Т-Банк
-PAY_NAME    = os.getenv("PAY_NAME", "Ирина Александровна П.")  # Получатель
-PAY_BANK    = os.getenv("PAY_BANK", "Т-Банк")                  # Отображаемое имя банка
+# кружок (video note) — file_id
+DEV_VIDEO_NOTE_ID = os.getenv("DEV_VIDEO_NOTE_ID", "")
 
-# Кружок (video note): file_id (получите через отправку кружка админом — см. хендлер ниже)
-DEV_VIDEO_NOTE_ID = os.getenv("DEV_VIDEO_NOTE_ID")  # например "AQAD...AAQ"
-DEV_INFO = os.getenv("DEV_INFO", "Разработчик: заглушка.\nПоддержка: @your_username")
+# оплата на карту
+PAY_PHONE   = os.getenv("PAY_PHONE", "+7XXXXXXXXXX")
+PAY_NAME    = os.getenv("PAY_NAME", "Ирина Александровна П.")
+PAY_BANK    = os.getenv("PAY_BANK", "Т-Банк")
 
-# TTL персональных ссылок (часы)
+# срок жизни персональных ссылок (часы)
 TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "48"))
 
-# Акция активна?
+# примеры ответов (file_id картинок)
+EXAMPLE_IDS = [
+    os.getenv("EXAMPLE_1_ID"),
+    os.getenv("EXAMPLE_2_ID"),
+    os.getenv("EXAMPLE_3_ID"),
+    os.getenv("EXAMPLE_4_ID"),
+    os.getenv("EXAMPLE_5_ID"),
+]
+
+# Акция (только 2 бота)
 PROMO_ACTIVE = os.getenv("PROMO_ACTIVE", "true").lower() == "true"
-# Акционные цены
 PROMO_PRICES = {
-    "unpack": 1890.00,
-    "copy":   2490.00,
-    "photo":  2490.00,
-    "b12":    3990.00,
-    "b13":    3790.00,
-    "b23":    4490.00,
-    "b123":   5990.00,
+    "unpack": 1890.00,   # Бот №1
+    "copy":   2490.00,   # Бот №2
+    "b12":    3990.00,   # Пакет 1+2
 }
 
-# Проверка .env
-if not (BOT_TOKEN and ADMIN_ID and DATABASE_URL and POLICY_URL and OFFER_URL and ADS_CONSENT_URL):
-    raise RuntimeError("Проверь .env: CASHIER_BOT_TOKEN, ADMIN_ID, DATABASE_URL, POLICY_URL, OFFER_URL, ADS_CONSENT_URL")
+# Конец акции и TZ для напоминаний
+PROMO_END_ISO = os.getenv("PROMO_END_ISO", "").strip()  # напр. 2025-08-18T00:00:00+03:00
+TIMEZONE      = os.getenv("TIMEZONE", "Europe/Moscow")
 
-# === DB ===
+if not (BOT_TOKEN and ADMIN_ID and DATABASE_URL and POLICY_URL and OFFER_URL and ADS_CONSENT_URL and DEV_INFO_URL):
+    raise RuntimeError("Проверь .env: CASHIER_BOT_TOKEN, ADMIN_ID, DATABASE_URL, POLICY_URL, OFFER_URL, ADS_CONSENT_URL, DEV_INFO_URL")
+
+# logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+log = logging.getLogger("cashier")
+
+# -------------------- DB --------------------
 conn = psycopg.connect(DATABASE_URL, autocommit=True, sslmode="require", row_factory=dict_row)
 cur  = conn.cursor()
 
@@ -101,7 +111,6 @@ cur.execute("""CREATE TABLE IF NOT EXISTS allowed_users(
   bot_name TEXT NOT NULL,
   PRIMARY KEY(user_id, bot_name)
 );""")
-# Запрос на чек от продавца
 cur.execute("""CREATE TABLE IF NOT EXISTS invoice_requests(
   id BIGSERIAL PRIMARY KEY,
   order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -109,15 +118,11 @@ cur.execute("""CREATE TABLE IF NOT EXISTS invoice_requests(
   closed BOOLEAN NOT NULL DEFAULT FALSE
 );""")
 
-# Каталог (базовые цены; при PROMO_ACTIVE применим PROMO_PRICES на этапе заказа)
+# Каталог базовых цен (без фото-бота)
 CATALOG = {
-    "unpack": {"title": "Бот №1 «Распаковка + Анализ ЦА (JTBD)»", "price": 2990.00,  "targets": [BOT_UNPACK]},
-    "copy":   {"title": "Бот №2 «Твой личный контент-помощник»",  "price": 5490.00,  "targets": [BOT_COPY]},
-    "photo":  {"title": "Бот №3 «Твой личный предметный фотограф»","price": 4490.00, "targets": [BOT_PHOTO]},
-    "b12":    {"title": "Пакет 1+2",                              "price": 7990.00,  "targets": [BOT_UNPACK, BOT_COPY]},
-    "b13":    {"title": "Пакет 1+3",                              "price": 6990.00,  "targets": [BOT_UNPACK, BOT_PHOTO]},
-    "b23":    {"title": "Пакет 2+3",                              "price": 9490.00,  "targets": [BOT_COPY, BOT_PHOTO]},
-    "b123":   {"title": "Пакет 1+2+3 (выгодно)",                  "price":11990.00,  "targets": [BOT_UNPACK, BOT_COPY, BOT_PHOTO]},
+    "unpack": {"title": "Бот №1 «Распаковка + Анализ ЦА (JTBD)»",        "price": 2990.00, "targets": [BOT_UNPACK]},
+    "copy":   {"title": "Бот №2 «Твой личный контент-помощник»",         "price": 5490.00, "targets": [BOT_COPY]},
+    "b12":    {"title": "Пакет «Распаковка + контент»",                  "price": 7990.00, "targets": [BOT_UNPACK, BOT_COPY]},
 }
 for code, p in CATALOG.items():
     cur.execute(
@@ -127,11 +132,7 @@ for code, p in CATALOG.items():
         (code, p["title"], p["price"], json.dumps(p["targets"]))
     )
 
-# === Утилиты ===
-def user_consented(user_id: int) -> bool:
-    cur.execute("SELECT 1 FROM consents WHERE user_id=%s", (user_id,))
-    return cur.fetchone() is not None
-
+# -------------------- Utils --------------------
 def set_consent(user_id: int):
     cur.execute("INSERT INTO consents(user_id, accepted_at) VALUES(%s, now()) ON CONFLICT DO NOTHING", (user_id,))
 
@@ -174,125 +175,127 @@ def gen_tokens_with_ttl(user_id: int, targets: list[str], ttl_hours: int):
 
 def shop_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Оплатить Бота №1", callback_data="buy:unpack")],
-        [InlineKeyboardButton("Оплатить Бота №2", callback_data="buy:copy")],
-        [InlineKeyboardButton("Оплатить Бота №3", callback_data="buy:photo")],
-        [InlineKeyboardButton("Пакет 1+2",        callback_data="buy:b12")],
-        [InlineKeyboardButton("Пакет 1+3",        callback_data="buy:b13")],
-        [InlineKeyboardButton("Пакет 2+3",        callback_data="buy:b23")],
-        [InlineKeyboardButton("Пакет 1+2+3",      callback_data="buy:b123")],
+        [InlineKeyboardButton("Оплатить бота «Распаковка + Анализ ЦА»",         callback_data="buy:unpack")],
+        [InlineKeyboardButton("Оплатить бота «Твой личный контент-помощник»",   callback_data="buy:copy")],
+        [InlineKeyboardButton("Оплатить ботов «Распаковка+контент»",            callback_data="buy:b12")],
     ])
 
 PROMO_TEXT = (
-    "🎁 Специальные стартовые цены\n"
-    "(только 2 дня)\n\n"
+    "🎁 Специальные цены для моей аудитории (только 2 дня)\n\n"
     "🛠 Боты по отдельности\n"
-    "• Бот №1 «Распаковка + Анализ ЦА» — 2 990 ₽ → 1 890 ₽ (выгода 1 100 ₽)\n"
-    "• Бот №2 «Твой личный контент-помощник» — 5 490 ₽ → 2 490 ₽ (выгода 3 000 ₽)\n"
-    "• Бот №3 «Твой личный предметный фотограф» — 4 490 ₽ → 2 490 ₽ (выгода 2 000 ₽)\n\n"
-    "💎 Пакеты — ещё выгоднее\n"
-    "• 1+2 — 7 990 ₽ → 3 990 ₽ (выгода 4 000 ₽)\n"
-    "• 1+3 — 6 990 ₽ → 3 790 ₽ (выгода 3 200 ₽)\n"
-    "• 2+3 — 8 490 ₽ → 4 490 ₽ (выгода 4 000 ₽)\n"
-    "• 1+2+3 — 11 990 ₽ → 5 990 ₽ (выгода 6 000 ₽)\n\n"
-    "📌 После окончания акции цены вырастут."
+    "• «Распаковка + Анализ ЦА» — <s>2 990 ₽</s> → 1 890 ₽ (выгода 1 100 ₽)\n"
+    "• «Твой личный контент-помощник» — <s>5 490 ₽</s> → 2 490 ₽ (выгода 3 000 ₽)\n\n"
+    "💎 Пакет — ещё выгоднее\n"
+    "• Боты «Распаковка+контент» — <s>7 990 ₽</s> → 3 990 ₽ (выгода 4 000 ₽)"
 )
 ABOUT_BOTS = (
-    "Бот №1 «Распаковка + Анализ ЦА (JTBD)» — про понимание, что клиенты реально «покупают», и как под это подстроить позиционирование и контент.\n\n"
-    "Бот №2 «Твой личный контент-помощник» — контент-план, посты, Reels/Stories, визуальные подсказки на основе распаковки.\n\n"
-    "Бот №3 «Твой личный предметный фотограф» — генерирует продающие предметные фото из ваших снимков товара: фон/сцена/свет меняются, товар остаётся тем же."
-)
-CONSENT_TEXT = (
-    "Перед оплатой подтвердите согласие с условиями:\n"
-    f"• Политика конфиденциальности — {POLICY_URL}\n"
-    f"• Договор оферты — {OFFER_URL}\n"
-    f"• Согласие на получение рекламных материалов — {ADS_CONSENT_URL}\n\n"
-    "Нажимая «✅ Согласен — перейти к оплате», вы принимаете условия."
+    "Бот №1 «Распаковка + Анализ ЦА (JTBD)» — про понимание, что клиенты реально «покупают», "
+    "и как под это подстроить позиционирование и контент.\n\n"
+    "Бот №2 «Твой личный контент-помощник» — контент-план, посты, Reels/Stories, визуальные подсказки "
+    "на основе распаковки."
 )
 
-
-
-# --- Examples block (screens only) ---
+# ----- Примеры ответов -----
 async def send_examples_screens(ctx, chat_id: int):
-    """Send media group with example screenshots/videos stored as file_id in .env.
-    ENV vars (fill what you need): EXAMPLE_1_ID..EXAMPLE_5_ID
-    """
-    ids = [
-        os.getenv("EXAMPLE_1_ID"),
-        os.getenv("EXAMPLE_2_ID"),
-        os.getenv("EXAMPLE_3_ID"),
-        os.getenv("EXAMPLE_4_ID"),
-        os.getenv("EXAMPLE_5_ID"),
-    ]
+    ids = [fid for fid in EXAMPLE_IDS if fid]
+    if not ids:
+        return
     media = []
-    valid = [x for x in ids if x]
-    for i, fid in enumerate(valid):
+    for i, fid in enumerate(ids):
         try:
             if i == 0:
                 media.append(InputMediaPhoto(media=fid, caption="Примеры ответов ботов"))
             else:
                 media.append(InputMediaPhoto(media=fid))
         except Exception as e:
-            print("[examples] bad file_id skipped:", e)
+            log.warning("Bad example file_id skipped: %s", e)
     if media:
         try:
             await ctx.bot.send_media_group(chat_id=chat_id, media=media)
         except Exception as e:
-            print("[examples] send_media_group error:", e)
+            log.warning("send_media_group error: %s", e)
 
-# === Handlers ===
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+# ----- Напоминания об окончании акции (T-48/T-24) -----
+def get_audience_user_ids() -> list[int]:
+    cur.execute("SELECT user_id FROM consents")
+    return [r["user_id"] for r in cur.fetchall()]
 
-    # Кружок (если указан file_id)
-    if DEV_VIDEO_NOTE_ID:
+async def job_promo_countdown(ctx: ContextTypes.DEFAULT_TYPE):
+    hours_left = ctx.job.data
+    if hours_left == 48:
+        text = "⏰ Через 2 суток спеццены закончатся. Успейте оформить заказ по акции."
+    elif hours_left == 24:
+        text = "⏰ Через сутки спеццены закончатся. Последний шанс купить выгодно."
+    else:
+        text = f"⏰ Напоминание: осталось ~{hours_left} часов до окончания акции."
+    kb = shop_keyboard()
+    for uid in get_audience_user_ids():
         try:
-            await ctx.bot.send_video_note(chat_id=uid, video_note=DEV_VIDEO_NOTE_ID)
+            await ctx.bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
         except Exception:
             pass
 
-    # Юр-гейт
+# -------------------- Handlers --------------------
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+
+    # 1) Сначала «О разработчике» (только кнопка)
+    dev_kb = InlineKeyboardMarkup([[InlineKeyboardButton("👩‍💻 Информация о разработчике", url=DEV_INFO_URL)]])
+    await update.message.reply_text("Коротко обо мне:", reply_markup=dev_kb)
+
+    # 2) Кружок (если указан file_id)
+    if DEV_VIDEO_NOTE_ID:
+        try:
+            await ctx.bot.send_video_note(chat_id=uid, video_note=DEV_VIDEO_NOTE_ID)
+        except Exception as e:
+            log.warning("video note send error: %s", e)
+
+    # 3) Юридический «гейт» — ссылки только в кнопках
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Согласен — перейти к оплате", callback_data="consent_ok")]
+        [InlineKeyboardButton("📄 Политика конфиденциальности", url=POLICY_URL)],
+        [InlineKeyboardButton("📜 Договор оферты",              url=OFFER_URL)],
+        [InlineKeyboardButton("✉️ Согласие на рекламу",        url=ADS_CONSENT_URL)],
+        [InlineKeyboardButton("✅ Согласен — перейти к оплате", callback_data="go_shop")],
     ])
-    await update.message.reply_text(CONSENT_TEXT, reply_markup=kb)
-    # Инфо о разработчике (заглушка)
-    await ctx.bot.send_message(chat_id=uid, text=DEV_INFO)
+    await ctx.bot.send_message(
+        chat_id=uid,
+        text="Перед оплатой подтвердите согласие с условиями. Нажимая «✅ Согласен — перейти к оплате», вы принимаете условия.",
+        reply_markup=kb
+    )
 
 async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
 
-    if q.data == "consent_ok":
+    if q.data == "go_shop":
         set_consent(uid)
-        await q.edit_message_text(PROMO_TEXT)
+        await q.edit_message_text(PROMO_TEXT, parse_mode="HTML")
         await ctx.bot.send_message(chat_id=uid, text="Выберите продукт для оформления заказа:", reply_markup=shop_keyboard())
         await ctx.bot.send_message(chat_id=uid, text=ABOUT_BOTS)
-        # Reviews screenshots block
         await send_examples_screens(ctx, uid)
         return
 
     if q.data.startswith("buy:"):
-        if not user_consented(uid):
-            await q.answer("Сначала подтвердите согласие.", show_alert=True)
-            return
         code = q.data.split(":", 1)[1]
         prod = get_product(code)
         if not prod:
             await q.edit_message_text("Продукт не найден.")
             return
-
         order_id = create_order(uid, code)
         price = current_price(code)
+        set_status(order_id, "await_receipt")
 
-        # Инструкция по оплате на карту (без внешних ссылок)
+        old = float(prod["price"])
+        old_line = f"Старая цена: <s>{old:.2f} ₽</s>\n" if PROMO_ACTIVE else ""
+
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("📤 Отправить чек по этому заказу", callback_data=f"send_receipt:{order_id}")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="consent_ok")]
+            [InlineKeyboardButton("◀️ Назад", callback_data="go_shop")]
         ])
         await q.edit_message_text(
             f"🧾 <b>{prod['title']}</b>\n"
+            f"{old_line}"
             f"Сумма к оплате: <b>{price:.2f} ₽</b>\n\n"
             f"Оплата по номеру телефона на карту {PAY_BANK}:\n"
             f"• Номер: <code>{PAY_PHONE}</code>\n"
@@ -302,8 +305,6 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=kb
         )
-        # Ожидаем чек
-        set_status(order_id, "await_receipt")
         return
 
     if q.data.startswith("send_receipt:"):
@@ -312,20 +313,15 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not order or order["user_id"] != uid:
             await q.edit_message_text("Заказ не найден.")
             return
-        await q.edit_message_text(
-            "Загрузите чек в ответ (фото/скан или документ PDF). "
-            "После проверки пришлём персональные ссылки."
-        )
+        await q.edit_message_text("Загрузите чек в ответ (фото/скан или документ PDF). После проверки пришлём персональные ссылки.")
         return
 
     if q.data.startswith("confirm:") or q.data.startswith("reject:") \
        or q.data.startswith("send_invoice:") or q.data.startswith("close_invoice:"):
-        # Админские действия
         if uid != ADMIN_ID:
             await q.answer("Нет прав.", show_alert=True)
             return
 
-        # Подтверждение/отклонение оплаты
         if q.data.startswith("confirm:") or q.data.startswith("reject:"):
             order_id = int(q.data.split(":", 1)[1])
             order = get_order(order_id)
@@ -351,32 +347,23 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "⚠️ Ссылки индивидуальные. Они действуют ограниченное время "
                 f"(~{TOKEN_TTL_HOURS} ч) и перестают работать после активации."
             )
-            # ссылки кнопками
             btns = [[InlineKeyboardButton(f"Открыть @{bn}", url=link)] for bn, link in links]
             btns.append([InlineKeyboardButton("🧾 Запросить чек от продавца", callback_data=f"request_invoice:{order['id']}")])
             await q.edit_message_text(f"Заказ #{order_id}: подтверждён. Ссылки отправлены.")
             try:
-                await ctx.bot.send_message(
-                    chat_id=order["user_id"],
-                    text="🎉 Доступ активирован!\n\n" + warn,
-                    reply_markup=InlineKeyboardMarkup(btns)
-                )
+                await ctx.bot.send_message(order["user_id"], warn, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
             except Exception:
                 pass
             return
 
-        # Отправка чека клиенту (после запроса)
         if q.data.startswith("send_invoice:"):
             order_id = int(q.data.split(":", 1)[1])
             cur.execute("UPDATE invoice_requests SET closed=FALSE WHERE order_id=%s", (order_id,))
-            # даём подсказку администратору
             await q.edit_message_text(
                 f"Загрузка чека для клиента по заказу #{order_id}.\n"
                 "Отправьте документ/фото в этот чат — я перешлю покупателю.\n"
                 "После отправки нажмите «Закрыть запрос».",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Закрыть запрос", callback_data=f"close_invoice:{order_id}")]
-                ])
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Закрыть запрос", callback_data=f"close_invoice:{order_id}")]])
             )
             return
 
@@ -387,13 +374,11 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
     if q.data.startswith("request_invoice:"):
-        # это вызов с пользовательской кнопки после подтверждения
         order_id = int(q.data.split(":", 1)[1])
         order = get_order(order_id)
         if not order or order["user_id"] != uid:
             await q.answer("Заказ не найден.", show_alert=True)
             return
-        # создаём/открываем запрос
         cur.execute(
             "INSERT INTO invoice_requests(order_id, closed) VALUES(%s, FALSE) "
             "ON CONFLICT (order_id) DO UPDATE SET closed=FALSE",
@@ -404,24 +389,15 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("✅ Закрыть запрос",        callback_data=f"close_invoice:{order_id}")],
         ])
         try:
-            await ctx.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"🧾 Запрос чека по заказу #{order_id}\nПокупатель: {uid}",
-                reply_markup=kb_admin
-            )
+            await ctx.bot.send_message(ADMIN_ID, f"🧾 Запрос чека по заказу #{order_id}\nПокупатель: {uid}", reply_markup=kb_admin)
         except Exception:
             pass
         await q.answer("Запрос на чек отправлен. Ждём файл от продавца.", show_alert=True)
         return
 
 async def receipts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Покупатель отправляет чек (фото/документ) при статусе await_receipt."""
     uid = update.effective_user.id
-    # найдём последний заказ в ожидании чека
-    cur.execute(
-        "SELECT id FROM orders WHERE user_id=%s AND status='await_receipt' ORDER BY id DESC LIMIT 1",
-        (uid,)
-    )
+    cur.execute("SELECT id FROM orders WHERE user_id=%s AND status='await_receipt' ORDER BY id DESC LIMIT 1", (uid,))
     row = cur.fetchone()
     if not row:
         return
@@ -440,26 +416,22 @@ async def receipts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cur.execute("INSERT INTO receipts(order_id, file_id, file_type) VALUES(%s,%s,%s)", (order_id, file_id, file_type))
     set_status(order_id, "pending")
 
-    kb_admin = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{order_id}"),
-         InlineKeyboardButton("❌ Отклонить",   callback_data=f"reject:{order_id}")]
-    ])
+    kb_admin = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{order_id}"),
+                                      InlineKeyboardButton("❌ Отклонить",   callback_data=f"reject:{order_id}")]])
     caption = f"💳 Чек по заказу #{order_id}\nПокупатель: {uid}"
     try:
         if file_type == "photo":
-            await ctx.bot.send_photo(chat_id=ADMIN_ID, photo=file_id, caption=caption, reply_markup=kb_admin)
+            await ctx.bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=kb_admin)
         else:
-            await ctx.bot.send_document(chat_id=ADMIN_ID, document=file_id, caption=caption, reply_markup=kb_admin)
+            await ctx.bot.send_document(ADMIN_ID, file_id, caption=caption, reply_markup=kb_admin)
     except Exception:
         pass
-
     await update.message.reply_text("Спасибо! Чек отправлен на проверку. Обычно подтверждение занимает несколько минут.")
 
+# --- Админ: отправка своего чека клиенту после запроса ---
 async def admin_invoice_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Админ отправляет файл чека клиенту в ответ на запрос (ищем последний открытый запрос)."""
     if update.effective_user.id != ADMIN_ID:
         return
-    # берём последний открытый запрос
     cur.execute("SELECT order_id FROM invoice_requests WHERE closed=FALSE ORDER BY id DESC LIMIT 1")
     row = cur.fetchone()
     if not row:
@@ -471,95 +443,91 @@ async def admin_invoice_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     file_id, is_photo = None, False
     if update.message.photo:
-        file_id, is_photo = update.message.photo[-1].file_id, True
+        file_id = update.message.photo[-1].file_id; is_photo = True
     elif update.message.document:
         file_id = update.message.document.file_id
     if not file_id:
         return
 
-    # Пересылаем покупателю
     try:
         if is_photo:
-            await ctx.bot.send_photo(chat_id=order["user_id"], photo=file_id, caption="🧾 Чек от продавца")
+            await ctx.bot.send_photo(order["user_id"], file_id, caption="🧾 Чек от продавца")
         else:
-            await ctx.bot.send_document(chat_id=order["user_id"], document=file_id, caption="🧾 Чек от продавца")
-        # Закрываем запрос
+            await ctx.bot.send_document(order["user_id"], file_id, caption="🧾 Чек от продавца")
         cur.execute("UPDATE invoice_requests SET closed=TRUE WHERE order_id=%s", (order_id,))
         await update.message.reply_text(f"Чек отправлен покупателю (заказ #{order_id}). Запрос закрыт.")
     except Exception:
         pass
 
+# --- /vnote: получить file_id кружка ---
 async def help_vnote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Админ может прислать кружок — бот вернёт file_id (чтобы занести в .env)."""
     if update.effective_user.id != ADMIN_ID:
         return
     await update.message.reply_text("Пришлите кружок (video note) — верну file_id.")
 
 async def detect_vnote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Если админ прислал video note — вернуть его file_id (для DEV_VIDEO_NOTE_ID)."""
     if update.effective_user.id != ADMIN_ID:
         return
     if update.message.video_note:
-        file_id = update.message.video_note.file_id
-        await update.message.reply_text(f"file_id кружка: {file_id}\nСкопируйте в .env как DEV_VIDEO_NOTE_ID")
+        await update.message.reply_text(f"file_id кружка: {update.message.video_note.file_id}\nСкопируйте в .env как DEV_VIDEO_NOTE_ID")
+
+# --- /photoid: выдать file_id примера (админ) ---
+async def cmd_photoid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    m = update.message
+    if m and m.reply_to_message and m.reply_to_message.photo:
+        await m.reply_text(f"[ADMIN] example file_id: {m.reply_to_message.photo[-1].file_id}")
+        return
+    if m and m.photo:
+        await m.reply_text(f"[ADMIN] example file_id: {m.photo[-1].file_id}")
+        return
+    await m.reply_text("Пришлите фото и ответьте на него командой /photoid (как reply).")
 
 async def fallback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Нажмите /start.")
 
-
-async def grab_review_photo_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Admin sends a photo to get its file_id for reviews.
-    Skips if there is an open invoice request to avoid collision with admin_invoice_upload.
-    """
-    if update.effective_user.id != ADMIN_ID:
-        return
-    # Skip if we are in the middle of invoice upload flow
-    cur.execute("SELECT 1 FROM invoice_requests WHERE closed=FALSE ORDER BY id DESC LIMIT 1")
-    if cur.fetchone():
-        return
-    if update.message and update.message.photo:
-        fid = update.message.photo[-1].file_id
-        await update.message.reply_text(f"[ADMIN] example file_id: {fid}")
-
-
-async def cmd_photoid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Admin-only. Reply with /photoid to a photo to get its file_id."""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    msg = update.message
-    if not msg:
-        return
-    # Reply-mode preferred
-    if msg.reply_to_message and msg.reply_to_message.photo:
-        fid = msg.reply_to_message.photo[-1].file_id
-        await msg.reply_text(f"[ADMIN] example file_id: {fid}")
-        return
-    # Fallback: command sent with attached photo (rare)
-    if msg.photo:
-        fid = msg.photo[-1].file_id
-        await msg.reply_text(f"[ADMIN] example file_id: {fid}")
-        return
-    await msg.reply_text("Пришлите фото и ответьте на него командой /photoid (как reply).")
-
-
 def main():
+    log.info("run_polling... token prefix: %s******", (BOT_TOKEN or "")[:10])
     app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("vnote", help_vnote))  # подсказка по кружку
+    app.add_handler(CommandHandler("vnote", help_vnote))
     app.add_handler(CommandHandler("photoid", cmd_photoid))
     app.add_handler(CallbackQueryHandler(cb))
 
-    # Admin: grab photo file_id for reviews
-    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, grab_review_photo_id))
-
-    # Покупатель присылает чек (фото/док)
+    # клиент присылает чек
     app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, receipts))
-    # Админ присылает кружок — получить file_id
+    # админ присылает кружок — получить file_id
     app.add_handler(MessageHandler(filters.VIDEO_NOTE & ~filters.COMMAND, detect_vnote))
-    # Админ заливает чек для клиента (после запроса)
+    # админ загружает чек для клиента (после запроса)
     app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, admin_invoice_upload))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
+
+    # --- Два одноразовых напоминания: T-48h и T-24h до конца акции ---
+    if PROMO_END_ISO:
+        try:
+            tz = ZoneInfo(TIMEZONE)
+            promo_end = datetime.fromisoformat(PROMO_END_ISO)
+            if promo_end.tzinfo is None:
+                promo_end = promo_end.replace(tzinfo=tz)
+
+            t_minus_48 = promo_end - timedelta(hours=48)
+            t_minus_24 = promo_end - timedelta(hours=24)
+            now = datetime.now(promo_end.tzinfo)
+
+            if t_minus_48 > now:
+                app.job_queue.run_once(job_promo_countdown, when=t_minus_48, data=48, name="promo_Tminus48h")
+                log.info("Scheduled T-48h at %s", t_minus_48.isoformat())
+
+            if t_minus_24 > now:
+                app.job_queue.run_once(job_promo_countdown, when=t_minus_24, data=24, name="promo_Tminus24h")
+                log.info("Scheduled T-24h at %s", t_minus_24.isoformat())
+
+        except Exception as e:
+            log.warning("PROMO countdown schedule error: %s", e)
+
     app.run_polling()
 
 if __name__ == "__main__":
