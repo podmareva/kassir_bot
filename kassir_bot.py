@@ -38,7 +38,7 @@ DEV_VIDEO_NOTE_ID = os.getenv("DEV_VIDEO_NOTE_ID", "").strip()
 # оплата на карту
 PAY_PHONE   = os.getenv("PAY_PHONE", "+7XXXXXXXXXX")
 PAY_NAME    = os.getenv("PAY_NAME", "Ирина Александровна П.")
-PAY_BANK    = os.getenv("PAY_BANK", "Т-Банк")
+PAY_BANK    = os.getenv("PAY_BANK", "ОЗОН-Банк")
 
 # срок жизни персональных ссылок (часы)
 TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "48"))
@@ -106,6 +106,8 @@ cur.execute("""CREATE TABLE IF NOT EXISTS tokens(
   user_id BIGINT NOT NULL,
   expires_at TIMESTAMPTZ NULL
 );""")
+# гарантируем наличие столбца для сроков действия токенов
+cur.execute("ALTER TABLE tokens ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NULL;")
 cur.execute("""CREATE TABLE IF NOT EXISTS allowed_users(
   user_id BIGINT NOT NULL,
   bot_name TEXT NOT NULL,
@@ -117,6 +119,7 @@ cur.execute("""CREATE TABLE IF NOT EXISTS invoice_requests(
   requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   closed BOOLEAN NOT NULL DEFAULT FALSE
 );""")
+
 
 # Каталог базовых цен (без фото-бота)
 CATALOG = {
