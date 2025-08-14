@@ -15,6 +15,28 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("cashier")
+
+async def safe_edit(q, text: str, **kwargs):
+    """
+    Универсальное редактирование: если сообщение медиа — меняем caption,
+    если обычное — меняем text.
+    """
+    try:
+        m = q.message
+        if getattr(m, "photo", None) or getattr(m, "document", None) or getattr(m, "video", None) or getattr(m, "video_note", None):
+            return await q.edit_message_caption(caption=text, **kwargs)
+        return await q.edit_message_text(text, **kwargs)
+    except Exception:
+        # fallback на альтернативный метод + лог
+        try:
+            return await q.edit_message_caption(caption=text, **kwargs)
+        except Exception:
+            log.exception("safe_edit: both edit_message_text and edit_message_caption failed")
+            return await q.edit_message_text(text, **kwargs)
+
 # -------------------- CONFIG / ENV --------------------
 load_dotenv()
 
@@ -260,29 +282,13 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📄 Политика конфиденциальности", url=POLICY_URL)],
         [InlineKeyboardButton("📜 Договор оферты",              url=OFFER_URL)],
         [InlineKeyboardButton("✉️ Согласие на рекламу",        url=ADS_CONSENT_URL)],
-        [InlineKeyboardButton("✅ Согласен — перейти к оплате", callback_data="go_shop")],
+        [InlineKeyboardButton("✅ Согласен — перейти к оплате", callback_data="consent_ok")],
     ])
     await ctx.bot.send_message(
         chat_id=uid,
         text="Перед оплатой подтвердите согласие с условиями. Нажимая «✅ Согласен — перейти к оплате», вы принимаете условия.",
         reply_markup=kb
     )
-
-async def safe_edit(q, text: str, **kwargs):
-    """
-    Универсальное редактирование: для медиа правит caption, для текста — text.
-    """
-    try:
-        msg = q.message
-        if getattr(msg, "photo", None) or getattr(msg, "document", None) or getattr(msg, "video", None) or getattr(msg, "video_note", None):
-            return await q.edit_message_caption(caption=text, **kwargs)
-        return await q.edit_message_text(text, **kwargs)
-    except Exception:
-        # на всякий случай: пробуем альтернативный метод
-        try:
-            return await q.edit_message_caption(caption=text, **kwargs)
-        except Exception:
-            return await q.edit_message_text(text, **kwargs)
 
 async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -295,9 +301,10 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
     try:
-        if data == "go_shop":
+        if data == "consent_ok":
             set_consent(uid)
-            await q.edit_message_text(PROMO_TEXT, parse_mode="HTML")
+            # если сообщение под кружком — редактировать безопасно
+            await safe_edit(q, PROMO_TEXT, parse_mode="HTML")
             await ctx.bot.send_message(chat_id=uid, text="Выберите продукт для оформления заказа:", reply_markup=shop_keyboard())
             await ctx.bot.send_message(chat_id=uid, text=ABOUT_BOTS)
             await send_examples_screens(ctx, uid)
