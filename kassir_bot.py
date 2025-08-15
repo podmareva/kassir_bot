@@ -500,6 +500,10 @@ async def receipts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Произошла ошибка при обработке чека. Попробуйте ещё раз или напишите в поддержку.")
 
 
+async def admin_invoice_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Админский приём файлов активен. Это заглушка — можно добавить логику позже.")
+
+
 # Регистрируем обработчики отдельно для админа и пользователей
 app.add_handler(MessageHandler(
     (filters.PHOTO | filters.Document.ALL) & filters.User(ADMIN_ID),
