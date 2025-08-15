@@ -375,7 +375,6 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb
             )
 
-            # Подсказка сразу после оформления заказа
             await ctx.bot.send_message(
                 chat_id=uid,
                 text=(
@@ -386,7 +385,6 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
 
-            # Напоминание через 1 час, если чек не отправлен
             async def remind_unpaid(context: ContextTypes.DEFAULT_TYPE):
                 cur.execute(
                     "SELECT status FROM orders WHERE id=%s", (order_id,)
@@ -405,10 +403,9 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         pass
 
             ctx.job_queue.run_once(remind_unpaid, when=3600, name=f"remind_order_{order_id}")
-
             return
 
-                if data.startswith("send_receipt:"):
+        if data.startswith("send_receipt:"):
             order_id = data.split(":", 1)[1]
             cur.execute("SELECT * FROM orders WHERE id=%s", (order_id,))
             row = cur.fetchone()
@@ -421,14 +418,11 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             await safe_edit(q, "📥 Отправьте фото/скриншот чека в этот чат.")
 
-            # Уведомление админу о новом заказе
             await ctx.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=(
-                    f"📩 Новый чек ожидается по заказу #{order_id}
-"
-                    f"Пользователь: <a href=\"tg://user?id={uid}\">{uid}</a>
-"
+                    f"📩 Новый чек ожидается по заказу #{order_id}\n"
+                    f"Пользователь: <a href=\"tg://user?id={uid}\">{uid}</a>\n"
                     f"Статус: <b>waiting_receipt_upload</b>"
                 ),
                 parse_mode="HTML"
