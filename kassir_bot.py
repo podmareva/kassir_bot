@@ -283,13 +283,21 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             log.warning("video note send error: %s", e)
 
-    # 2) Юридический «гейт» — ссылки только в кнопках
-    kb = InlineKeyboardMarkup([
+    # 2) Формируем клавиатуру
+    keyboard = [
         [InlineKeyboardButton("📄 Политика конфиденциальности", url=POLICY_URL)],
         [InlineKeyboardButton("📜 Договор оферты",              url=OFFER_URL)],
         [InlineKeyboardButton("✉️ Согласие на рекламу",        url=ADS_CONSENT_URL)],
         [InlineKeyboardButton("✅ Согласен — перейти к оплате", callback_data="consent_ok")],
-    ])
+    ]
+    
+    # Добавляем кнопку "О разработчике", если ссылка на него есть
+    if DEV_INFO_URL:
+        keyboard.append([InlineKeyboardButton("👨‍💻 О разработчике", url=DEV_INFO_URL)])
+
+    kb = InlineKeyboardMarkup(keyboard)
+    
+    # Отправляем юридический «гейт» с полной клавиатурой
     await ctx.bot.send_message(
         chat_id=uid,
         text=(
@@ -298,7 +306,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ),
         reply_markup=kb
     )
-
 
 async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
