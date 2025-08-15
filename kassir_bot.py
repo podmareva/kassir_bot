@@ -504,16 +504,16 @@ async def admin_invoice_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Админский приём файлов активен. Это заглушка — можно добавить логику позже.")
 
 
-# Регистрируем обработчики отдельно для админа и пользователей
-app.add_handler(MessageHandler(
-    (filters.PHOTO | filters.Document.ALL) & filters.User(ADMIN_ID),
-    admin_invoice_upload
-))
+def register_handlers(app: Application):
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.ALL) & filters.User(ADMIN_ID),
+        admin_invoice_upload
+    ))
 
-app.add_handler(MessageHandler(
-    (filters.PHOTO | filters.Document.ALL) & ~filters.User(ADMIN_ID),
-    receipts
-))
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.ALL) & ~filters.User(ADMIN_ID),
+        receipts
+    ))
 
 
 # --- Админ: отправка своего чека клиенту после запроса (если используешь запросы) ---
@@ -576,24 +576,30 @@ async def fallback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Нажмите /start.")
 
 def main():
-    log.info("run_polling... token prefix: %s******", (BOT_TOKEN or "")[:10])
+    from telegram.ext import CommandHandler, CallbackQueryHandler
+    from telegram.ext import MessageHandler, filters
+    from handlers import start, cb, help_vnote, cmd_photoid, detect_vnote, fallback, job_promo_countdown
+    from config import PROMO_END_ISO, TIMEZONE, BOT_TOKEN
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    import logging
+
+    log = logging.getLogger("cashier")
+    from telegram.ext import ApplicationBuilder
+    import os
+
     app = Application.builder().token(BOT_TOKEN).build()
+    register_handlers(app)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("vnote", help_vnote))
     app.add_handler(CommandHandler("photoid", cmd_photoid))
     app.add_handler(CallbackQueryHandler(cb))
-
-    # клиент присылает чек
     app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, receipts))
-    # админ присылает кружок — получить file_id
     app.add_handler(MessageHandler(filters.VIDEO_NOTE & ~filters.COMMAND, detect_vnote))
-    # админ загружает чек для клиента (после запроса)
     app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, admin_invoice_upload))
-    # текст —fallback
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
 
-    # --- Два одноразовых напоминания: T-48h и T-24h до конца акции ---
     if PROMO_END_ISO:
         try:
             tz = ZoneInfo(TIMEZONE)
@@ -615,8 +621,8 @@ def main():
 
         except Exception as e:
             log.warning("PROMO countdown schedule error: %s", e)
-
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
