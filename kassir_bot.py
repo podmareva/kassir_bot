@@ -271,19 +271,14 @@ async def job_promo_countdown(ctx: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
-    # 1) Сначала «О разработчике» (кнопка, если задана)
-    if DEV_INFO_URL:
-        dev_kb = InlineKeyboardMarkup([[InlineKeyboardButton("👩‍💻 Информация о разработчике", url=DEV_INFO_URL)]])
-        await update.message.reply_text("Коротко обо мне:", reply_markup=dev_kb)
-
-    # 2) Кружок (если указан file_id)
+    # 1) Кружок (если указан file_id)
     if DEV_VIDEO_NOTE_ID:
         try:
             await ctx.bot.send_video_note(chat_id=uid, video_note=DEV_VIDEO_NOTE_ID)
         except Exception as e:
             log.warning("video note send error: %s", e)
 
-    # 3) Юридический «гейт» — ссылки только в кнопках
+    # 2) Юридический «гейт» — ссылки только в кнопках
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Политика конфиденциальности", url=POLICY_URL)],
         [InlineKeyboardButton("📜 Договор оферты",              url=OFFER_URL)],
@@ -292,15 +287,19 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ])
     await ctx.bot.send_message(
         chat_id=uid,
-        text="Перед оплатой подтвердите согласие с условиями. Нажимая «✅ Согласен — перейти к оплате», вы принимаете условия.",
+        text=(
+            "Прежде чем продолжить, подтвердите согласие с условиями использования.\n\n"
+            "Нажимая кнопку \u00ab✅ Согласен — перейти к оплате\u00bb, вы принимаете условия:"
+        ),
         reply_markup=kb
     )
+
 
 async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
     data = q.data or ""
-    # тост на каждое нажатие
+
     try:
         await q.answer("⏳ Обрабатываю…", show_alert=False)
     except Exception:
@@ -309,14 +308,40 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         if data == "consent_ok":
             set_consent(uid)
-            await safe_edit(q, PROMO_TEXT, parse_mode="HTML")
-            await ctx.bot.send_message(chat_id=uid, text="Выберите продукт для оформления заказа:", reply_markup=shop_keyboard())
-            await ctx.bot.send_message(chat_id=uid, text=ABOUT_BOTS)
-            # await send_examples_screens(ctx, uid)
-            return
 
-        if data == "upload_receipt":
-            await ctx.bot.send_message(uid, "📎 Пришлите фото или PDF вашего чека одним сообщением. Я проверю и пришлю доступ.")
+            await safe_edit(q, "✅ Вы подтвердили согласие. Давайте покажу, как работают боты:", parse_mode="HTML")
+
+            await ctx.bot.send_message(
+                chat_id=uid,
+                text=(
+                    "🧠 <b>Бот №1: Распаковка + Анализ ЦА (JTBD)</b>\n"
+                    "Поможет понять, что на самом деле «покупает» клиент, и как правильно сформулировать позиционирование.\n\n"
+                    "✍️ <b>Бот №2: Контент-помощник</b>\n"
+                    "Создаёт контент-план, тексты, Reels, визуальные подсказки — на основе вашей распаковки."
+                ),
+                parse_mode="HTML"
+            )
+
+            await send_examples_screens(ctx, uid)
+
+            await ctx.bot.send_message(
+                chat_id=uid,
+                text=(
+                    "🎁 <b>Спеццены только 2 дня:</b>\n\n"
+                    "🛠 <b>Отдельные боты</b>\n"
+                    "• Распаковка + Анализ ЦА — <s>2 990 ₽</s> → <b>1 890 ₽</b>\n"
+                    "• Контент-помощник — <s>3 890 ₽</s> → <b>2 490 ₽</b>\n\n"
+                    "💎 <b>Пакет 1+2</b>\n"
+                    "• Всё вместе — <s>6 880 ₽</s> → <b>3 990 ₽</b>"
+                ),
+                parse_mode="HTML"
+            )
+
+            await ctx.bot.send_message(
+                chat_id=uid,
+                text="👇 Выберите продукт, который хотите оплатить:",
+                reply_markup=shop_keyboard()
+            )
             return
 
         if data.startswith("buy:"):
@@ -325,6 +350,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not prod:
                 await q.edit_message_text("Продукт не найден. Обновите витрину: /start")
                 return
+
             order_id = create_order(uid, code)
             price = current_price(code)
             set_status(order_id, "await_receipt")
@@ -334,21 +360,52 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📤 Отправить чек по этому заказу", callback_data=f"send_receipt:{order_id}")],
-                [InlineKeyboardButton("◀️ Назад", callback_data="go_shop")]
+                [InlineKeyboardButton("◀️ Назад к списку", callback_data="go_shop")]
             ])
+
             await q.edit_message_text(
-                f"🧾 <b>{prod['title']}</b>\n"
-                f"{old_line}"
-                f"Сумма к оплате: <b>{price:.2f} ₽</b>\n\n"
-                f"Оплата по номеру телефона на карту {PAY_BANK}:\n"
+                f"🧾 <b>{prod['title']}</b>\n\n"
+                f"{old_line}Сумма к оплате: <b>{price:.2f} ₽</b>\n\n"
+                f"💳 <b>Оплата на карту {PAY_BANK}</b>\n"
                 f"• Номер: <code>{PAY_PHONE}</code>\n"
                 f"• Получатель: <b>{PAY_NAME}</b>\n"
                 f"• Комментарий к переводу: <code>ORDER-{order_id}</code>\n\n"
-                "После оплаты вернитесь и нажмите «📤 Отправить чек по этому заказу» "
-                "или «📄 Загрузить чек» внизу витрины.",
+                "После оплаты нажмите кнопку ниже или прикрепите чек через витрину.",
                 parse_mode="HTML",
                 reply_markup=kb
             )
+
+            # Подсказка сразу после оформления заказа
+            await ctx.bot.send_message(
+                chat_id=uid,
+                text=(
+                    "🔔 <b>Важно:</b> После оплаты прикрепите чек.\n"
+                    "Я проверю его и отправлю доступ к выбранному боту.\n\n"
+                    "Если возникнут вопросы — просто напишите сюда."
+                ),
+                parse_mode="HTML"
+            )
+
+            # Напоминание через 1 час, если чек не отправлен
+            async def remind_unpaid(context: ContextTypes.DEFAULT_TYPE):
+                cur.execute(
+                    "SELECT status FROM orders WHERE id=%s", (order_id,)
+                )
+                row = cur.fetchone()
+                if row and row["status"] == "await_receipt":
+                    try:
+                        await context.bot.send_message(
+                            chat_id=uid,
+                            text=(
+                                "⏰ Напоминание: вы оформили заказ, но ещё не прикрепили чек.\n"
+                                "Пожалуйста, завершите оплату, чтобы получить доступ к боту."
+                            )
+                        )
+                    except Exception:
+                        pass
+
+            ctx.job_queue.run_once(remind_unpaid, when=3600, name=f"remind_order_{order_id}")
+
             return
 
         if data.startswith("send_receipt:"):
