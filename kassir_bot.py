@@ -450,16 +450,13 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await safe_edit(q, "👇 Выберите продукт, который хотите оплатить:", reply_markup=shop_keyboard())
             return
 
-...(весь предыдущий код без изменений)...
-
-
 async def receipts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         if not update.message:
             return
 
         uid = update.effective_user.id
-        file = update.message.document or update.message.photo[-1]
+        file = update.message.document or (update.message.photo[-1] if update.message.photo else None)
         if not file:
             await update.message.reply_text("Пожалуйста, отправьте изображение или PDF-файл чека.")
             return
@@ -501,6 +498,19 @@ async def receipts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.exception("Ошибка в receipts")
         await update.message.reply_text("Произошла ошибка при обработке чека. Попробуйте ещё раз или напишите в поддержку.")
+
+
+# Регистрируем обработчики отдельно для админа и пользователей
+app.add_handler(MessageHandler(
+    (filters.PHOTO | filters.Document.ALL) & filters.User(ADMIN_ID),
+    admin_invoice_upload
+))
+
+app.add_handler(MessageHandler(
+    (filters.PHOTO | filters.Document.ALL) & ~filters.User(ADMIN_ID),
+    receipts
+))
+
 
 # --- Админ: отправка своего чека клиенту после запроса (если используешь запросы) ---
 async def admin_invoice_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
