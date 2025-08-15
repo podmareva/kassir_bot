@@ -408,105 +408,53 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             return
 
-        if data.startswith("send_receipt:"):
-            order_id = int(data.split(":", 1)[1])
-            order = get_order(order_id)
-            if not order or order["user_id"] != uid:
-                await q.edit_message_text("Заказ не найден. Откройте витрину: /start")
+                if data.startswith("send_receipt:"):
+            order_id = data.split(":", 1)[1]
+            cur.execute("SELECT * FROM orders WHERE id=%s", (order_id,))
+            row = cur.fetchone()
+            if not row:
+                await q.edit_message_text("Заказ не найден")
                 return
-            await q.edit_message_text("Загрузите чек (фото или PDF) одним сообщением. После проверки пришлю доступ.")
-            return
-
-        # --- админские действия ---
-        if data.startswith("confirm:") or data.startswith("reject:") \
-           or data.startswith("send_invoice:") or data.startswith("close_invoice:"):
-            if uid != ADMIN_ID:
-                try:
-                    await q.answer("Нет прав.", show_alert=True)
-                except Exception:
-                    pass
+            if row["status"] != "await_receipt":
+                await q.edit_message_text("Заказ уже обработан")
                 return
 
-            if data.startswith("confirm:") or data.startswith("reject:"):
-                order_id = int(data.split(":", 1)[1])
-                order = get_order(order_id)
-                if not order:
-                    await q.edit_message_text("Заказ не найден.")
-                    return
+            await safe_edit(q, "📥 Отправьте фото/скриншот чека в этот чат.")
 
-                if data.startswith("reject:"):
-                    set_status(order_id, "rejected")
-                    await safe_edit(q, f"Заказ #{order_id}: отклонён.", reply_markup=None)
-                    try:
-                        await ctx.bot.send_message(
-                            order["user_id"],
-                            "❌ Оплата не подтверждена. Если это ошибка — загрузите чек ещё раз."
-                        )
-                    except Exception:
-                        pass
-                    return
-
-
-                # confirm
-                set_status(order_id, "paid")
-                prod  = get_product(order["product_code"])
-                links = gen_tokens_with_ttl(order["user_id"], prod["targets"], TOKEN_TTL_HOURS)
-
-                warn = (
-                    "✅ Чек проверен.\n\n"
-                    "⚠️ Ссылки индивидуальные. Они действуют ограниченное время "
-                    f"(~{TOKEN_TTL_HOURS} ч) и перестают работать после активации."
-                )
-                btns = [[InlineKeyboardButton(f"Открыть @{bn}", url=link)] for bn, link in links]
-
-                await safe_edit(q, f"Заказ #{order_id}: подтверждён. Ссылки отправлены.", reply_markup=None)
-
-                try:
-                    await ctx.bot.send_message(
-                        order["user_id"], warn,
-                        reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML"
-                    )
-                except Exception:
-                    pass
-                return
-
-
-            if data.startswith("close_invoice:"):
-                order_id = int(data.split(":", 1)[1])
-                cur.execute("UPDATE invoice_requests SET closed=TRUE WHERE order_id=%s", (order_id,))
-                await safe_edit(f"Запрос на чек по заказу #{order_id} закрыт.")
-                return
-
-        if data.startswith("request_invoice:"):
-            order_id = int(data.split(":", 1)[1])
-            order = get_order(order_id)
-            if not order or order["user_id"] != uid:
-                await q.answer("Заказ не найден.", show_alert=True)
-                return
-            cur.execute(
-                "INSERT INTO invoice_requests(order_id, closed) VALUES(%s, FALSE) "
-                "ON CONFLICT (order_id) DO UPDATE SET closed=FALSE",
-                (order_id,)
+            # Уведомление админу о новом заказе
+            await ctx.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=(
+                    f"📩 Новый чек ожидается по заказу #{order_id}
+"
+                    f"Пользователь: <a href=\"tg://user?id={uid}\">{uid}</a>
+"
+                    f"Статус: <b>waiting_receipt_upload</b>"
+                ),
+                parse_mode="HTML"
             )
-            kb_admin = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📤 Отправить чек клиенту", callback_data=f"send_invoice:{order_id}")],
-                [InlineKeyboardButton("✅ Закрыть запрос",        callback_data=f"close_invoice:{order_id}")],
-            ])
-            try:
-                await ctx.bot.send_message(ADMIN_ID, f"🧾 Запрос чека по заказу #{order_id}\nПокупатель: {uid}", reply_markup=kb_admin)
-            except Exception:
-                pass
-            await q.answer("Запрос на чек отправлен. Ждём файл от продавца.", show_alert=True)
+            set_status(order_id, "waiting_receipt_upload")
             return
 
-        await q.answer("Команда не распознана.", show_alert=False)
+        if data.startswith("confirm:"):
+            order_id = data.split(":", 1)[1]
+            set_status(order_id, "paid")
+            uid = get_user_by_order(order_id)
+            await q.edit_message_text("✅ Заказ подтверждён и оплачен")
+            await ctx.bot.send_message(uid, "✅ Чек проверен! Доступ к боту открыт.")
+            return
 
-    except Exception:
-        log.exception("Callback error for data=%r uid=%s", data, uid)
-        try:
-            await ctx.bot.send_message(uid, "⚠️ Во время обработки произошла ошибка. Попробуйте ещё раз: /start")
-        except Exception:
-            pass
+        if data.startswith("reject:"):
+            order_id = data.split(":", 1)[1]
+            set_status(order_id, "rejected")
+            uid = get_user_by_order(order_id)
+            await q.edit_message_text("❌ Заказ отклонён")
+            await ctx.bot.send_message(uid, "❌ Чек отклонён. Пожалуйста, прикрепите корректный чек.")
+            return
+
+        if data == "go_shop":
+            await safe_edit(q, "👇 Выберите продукт, который хотите оплатить:", reply_markup=shop_keyboard())
+            return
 
 async def receipts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Покупатель отправляет чек (фото/документ). Привяжем к последнему await_receipt и перешлём админу."""
