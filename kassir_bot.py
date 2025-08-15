@@ -192,6 +192,11 @@ def get_order(order_id: int) -> Optional[dict]:
     cur.execute("SELECT * FROM orders WHERE id=%s", (order_id,))
     return cur.fetchone()
 
+def get_user_by_order(order_id: int) -> Optional[int]:
+    cur.execute("SELECT user_id FROM orders WHERE id=%s", (order_id,))
+    row = cur.fetchone()
+    return row["user_id"] if row else None
+    
 def gen_tokens_with_ttl(user_id: int, targets: list[str], ttl_hours: int):
     links = []
     expires_at = datetime.utcnow() + timedelta(hours=ttl_hours) if ttl_hours > 0 else None
@@ -406,49 +411,52 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         if data.startswith("send_receipt:"):
-            order_id = data.split(":", 1)[1]
-            cur.execute("SELECT * FROM orders WHERE id=%s", (order_id,))
+            order_id = int(data.split(":", 1)[1])
+            cur.execute("SELECT * FROM orders WHERE id=%s AND user_id=%s", (order_id, uid))
             row = cur.fetchone()
             if not row:
                 await q.edit_message_text("Заказ не найден")
                 return
-            if row["status"] != "await_receipt":
-                await q.edit_message_text("Заказ уже обработан")
+            if row["status"] not in ["await_receipt", "pending"]:
+                await q.edit_message_text("Вы уже отправляли чек по этому заказу. Ожидайте.")
                 return
 
-            await safe_edit(q, "📥 Отправьте фото/скриншот чека в этот чат.")
-
-            await ctx.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=(
-                    f"📩 Новый чек ожидается по заказу #{order_id}\n"
-                    f"Пользователь: <a href=\"tg://user?id={uid}\">{uid}</a>\n"
-                    f"Статус: <b>waiting_receipt_upload</b>"
-                ),
-                parse_mode="HTML"
-            )
             set_status(order_id, "waiting_receipt_upload")
+            await safe_edit(q, "📥 Отлично! Теперь просто отправьте фото или скриншот чека в этот чат.")
             return
 
         if data.startswith("confirm:"):
-            order_id = data.split(":", 1)[1]
+            order_id = int(data.split(":", 1)[1])
             set_status(order_id, "paid")
             uid = get_user_by_order(order_id)
-            await q.edit_message_text("✅ Заказ подтверждён и оплачен")
-            await ctx.bot.send_message(uid, "✅ Чек проверен! Доступ к боту открыт.")
+            if uid:
+                await q.edit_message_text(f"✅ Заказ #{order_id} подтверждён и оплачен.")
+                await ctx.bot.send_message(uid, "✅ Ваш чек проверен! Доступ к боту открыт.")
+            else:
+                await q.edit_message_text(f"⚠️ Заказ #{order_id} подтверждён, но пользователь не найден.")
             return
 
         if data.startswith("reject:"):
-            order_id = data.split(":", 1)[1]
+            order_id = int(data.split(":", 1)[1])
             set_status(order_id, "rejected")
             uid = get_user_by_order(order_id)
-            await q.edit_message_text("❌ Заказ отклонён")
-            await ctx.bot.send_message(uid, "❌ Чек отклонён. Пожалуйста, прикрепите корректный чек.")
+            if uid:
+                await q.edit_message_text(f"❌ Заказ #{order_id} отклонён.")
+                await ctx.bot.send_message(uid, "❌ К сожалению, ваш чек отклонён. Пожалуйста, проверьте данные и прикрепите корректный чек.")
+            else:
+                await q.edit_message_text(f"⚠️ Заказ #{order_id} отклонён, но пользователь не найден.")
             return
 
         if data == "go_shop":
             await safe_edit(q, "👇 Выберите продукт, который хотите оплатить:", reply_markup=shop_keyboard())
             return
+            
+    except Exception as e:
+        log.exception("Ошибка в обработчике колбэков (cb)")
+        try:
+            await safe_edit(q, "Ой, что-то пошло не так. Попробуйте снова или нажмите /start")
+        except Exception:
+            pass
 
 async def receipts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
