@@ -427,28 +427,49 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         if data.startswith("confirm:"):
             order_id = int(data.split(":", 1)[1])
+            
+            # 1. Получаем всю информацию о заказе
+            order = get_order(order_id)
+            if not order:
+                await q.edit_message_text(f"⚠️ Заказ #{order_id} не найден в базе.")
+                return
+
+            # 2. Меняем статус на "оплачено"
             set_status(order_id, "paid")
-            uid = get_user_by_order(order_id)
-            if uid:
-                await q.edit_message_text(f"✅ Заказ #{order_id} подтверждён и оплачен.")
-                await ctx.bot.send_message(uid, "✅ Ваш чек проверен! Доступ к боту открыт.")
-            else:
-                await q.edit_message_text(f"⚠️ Заказ #{order_id} подтверждён, но пользователь не найден.")
-            return
+            
+            # 3. Получаем информацию о купленном продукте
+            product = get_product(order["product_code"])
+            if not product:
+                await q.edit_message_text(f"⚠️ Продукт '{order['product_code']}' для заказа #{order_id} не найден.")
+                return
 
-        if data.startswith("reject:"):
-            order_id = int(data.split(":", 1)[1])
-            set_status(order_id, "rejected")
-            uid = get_user_by_order(order_id)
-            if uid:
-                await q.edit_message_text(f"❌ Заказ #{order_id} отклонён.")
-                await ctx.bot.send_message(uid, "❌ К сожалению, ваш чек отклонён. Пожалуйста, проверьте данные и прикрепите корректный чек.")
-            else:
-                await q.edit_message_text(f"⚠️ Заказ #{order_id} отклонён, но пользователь не найден.")
-            return
+            # 4. Генерируем уникальные ссылки доступа
+            user_id = order["user_id"]
+            targets = product["targets"] # Список ботов, например ['jtbd_assistant_bot']
+            links = gen_tokens_with_ttl(user_id, targets, TOKEN_TTL_HOURS)
 
-        if data == "go_shop":
-            await safe_edit(q, "👇 Выберите продукт, который хотите оплатить:", reply_markup=shop_keyboard())
+            # 5. Формируем и отправляем сообщение пользователю со ссылками
+            link_lines = "\n".join([f"➡️ <a href='{link}'>{bot_name}</a>" for bot_name, link in links])
+            
+            try:
+                await ctx.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "✅ Оплата подтверждена!\n\n"
+                        "Вот ваши персональные ссылки для доступа к ботам:\n\n"
+                        f"{link_lines}\n\n"
+                        f"⚠️ <b>Важно:</b> Ссылки действительны в течение {TOKEN_TTL_HOURS} часов. "
+                        "Обязательно перейдите по ним и запустите ботов, чтобы доступ сохранился навсегда."
+                    ),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
+                )
+                # 6. Сообщаем админу, что всё прошло успешно
+                await q.edit_message_caption(caption=f"✅ Доступ по заказу #{order_id} успешно выдан пользователю {user_id}.")
+            except Exception as e:
+                log.error(f"Не удалось отправить ссылки пользователю {user_id} по заказу #{order_id}: {e}")
+                await q.edit_message_caption(caption=f"❌ Ошибка при выдаче доступа по заказу #{order_id}. Пользователю {user_id} не удалось отправить сообщение. Проверьте логи.")
+            
             return
             
     except Exception as e:
