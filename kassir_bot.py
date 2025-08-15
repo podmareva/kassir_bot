@@ -450,41 +450,57 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await safe_edit(q, "👇 Выберите продукт, который хотите оплатить:", reply_markup=shop_keyboard())
             return
 
+...(весь предыдущий код без изменений)...
+
+
 async def receipts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Покупатель отправляет чек (фото/документ). Привяжем к последнему await_receipt и перешлём админу."""
-    uid = update.effective_user.id
-    # последний заказ, который ждёт чека
-    cur.execute("SELECT id FROM orders WHERE user_id=%s AND status='await_receipt' ORDER BY id DESC LIMIT 1", (uid,))
-    row = cur.fetchone()
-    if not row:
-        return
-    order_id = row["id"]
-
-    file_id, file_type = None, None
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        file_type = "photo"
-    elif update.message.document:
-        file_id = update.message.document.file_id
-        file_type = "document"
-    if not file_id:
-        await update.message.reply_text("⚠ Пришлите фото или PDF одним сообщением.")
-        return
-
-    cur.execute("INSERT INTO receipts(order_id, file_id, file_type) VALUES(%s,%s,%s)", (order_id, file_id, file_type))
-    set_status(order_id, "pending")
-
-    kb_admin = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{order_id}"),
-                                      InlineKeyboardButton("❌ Отклонить",   callback_data=f"reject:{order_id}")]])
-    caption = f"💳 Чек по заказу #{order_id}\nПокупатель: {uid}"
     try:
-        if file_type == "photo":
-            await ctx.bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=kb_admin)
+        if not update.message:
+            return
+
+        uid = update.effective_user.id
+        file = update.message.document or update.message.photo[-1]
+        if not file:
+            await update.message.reply_text("Пожалуйста, отправьте изображение или PDF-файл чека.")
+            return
+
+        cur.execute("SELECT id FROM orders WHERE user_id=%s AND status=%s ORDER BY id DESC LIMIT 1", (uid, "waiting_receipt_upload"))
+        row = cur.fetchone()
+        if not row:
+            await update.message.reply_text("Нет заказов, ожидающих прикрепления чека.")
+            return
+
+        order_id = row["id"]
+        file_id = file.file_id
+
+        # отправляем админу на проверку
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{order_id}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{order_id}")
+            ]
+        ])
+
+        await ctx.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=(
+                f"🧾 Чек по заказу #{order_id}\n"
+                f"Пользователь: <a href=\"tg://user?id={uid}\">{uid}</a>"
+            ),
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+
+        if update.message.document:
+            await ctx.bot.send_document(chat_id=ADMIN_ID, document=file_id)
         else:
-            await ctx.bot.send_document(ADMIN_ID, file_id, caption=caption, reply_markup=kb_admin)
-    except Exception:
-        pass
-    await update.message.reply_text("✅ Чек отправлен на проверку. Ожидайте ответа.")
+            await ctx.bot.send_photo(chat_id=ADMIN_ID, photo=file_id)
+
+        await update.message.reply_text("✅ Чек отправлен. Ожидайте подтверждения от администратора.")
+
+    except Exception as e:
+        log.exception("Ошибка в receipts")
+        await update.message.reply_text("Произошла ошибка при обработке чека. Попробуйте ещё раз или напишите в поддержку.")
 
 # --- Админ: отправка своего чека клиенту после запроса (если используешь запросы) ---
 async def admin_invoice_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
