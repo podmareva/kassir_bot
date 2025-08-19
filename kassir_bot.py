@@ -611,56 +611,33 @@ async def cmd_photoid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def fallback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Нажмите /start.")
 
-def main():
-    """Запускает бота."""
-    app = Application.builder().token(BOT_TOKEN).build()
+import time
+from telegram import Update
+from telegram.error import Conflict
 
-    # Регистрация обработчиков
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    register_handlers(app)
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("vnote", help_vnote))
     app.add_handler(CommandHandler("photoid", cmd_photoid))
     app.add_handler(CallbackQueryHandler(cb))
-    
-    # Обработчики сообщений
-    # Важно: admin_invoice_upload должен быть проверен до receipts, если админ шлёт файл
-    app.add_handler(MessageHandler(
-        (filters.PHOTO | filters.Document.ALL) & filters.User(ADMIN_ID) & ~filters.COMMAND, 
-        admin_invoice_upload
-    ))
-    app.add_handler(MessageHandler(
-        (filters.PHOTO | filters.Document.ALL) & ~filters.User(ADMIN_ID) & ~filters.COMMAND, 
-        receipts
-    ))
-    app.add_handler(MessageHandler(filters.VIDEO_NOTE & filters.User(ADMIN_ID) & ~filters.COMMAND, detect_vnote))
+    app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, receipts))
+    app.add_handler(MessageHandler(filters.VIDEO_NOTE & ~filters.COMMAND, detect_vnote))
+    app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, admin_invoice_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
 
-    # Запуск задач по расписанию (напоминания об акции)
-    if PROMO_END_ISO:
+    while True:
         try:
-            tz = ZoneInfo(TIMEZONE)
-            promo_end = datetime.fromisoformat(PROMO_END_ISO)
-            if promo_end.tzinfo is None:
-                promo_end = promo_end.replace(tzinfo=tz)
-
-            now = datetime.now(tz)
-            
-            t_minus_48 = promo_end - timedelta(hours=48)
-            t_minus_24 = promo_end - timedelta(hours=24)
-
-            if t_minus_48 > now:
-                app.job_queue.run_once(job_promo_countdown, when=t_minus_48, data=48, name="promo_Tminus48h")
-                log.info("Запланировано напоминание T-48h на %s", t_minus_48.isoformat())
-
-            if t_minus_24 > now:
-                app.job_queue.run_once(job_promo_countdown, when=t_minus_24, data=24, name="promo_Tminus24h")
-                log.info("Запланировано напоминание T-24h на %s", t_minus_24.isoformat())
-
+            log.info("🚀 Запускаю бота через polling...")
+            app.run_polling(allowed_updates=Update.ALL_TYPES)
+        except Conflict:
+            log.warning("⚠️ Обнаружен второй экземпляр. Ждём 10 секунд и пробуем снова...")
+            time.sleep(10)
         except Exception as e:
-            log.warning("Ошибка планирования напоминаний об акции: %s", e)
-
-    # Запуск бота
-    log.info("Бот запускается...")
-    app.run_polling()
+            log.exception("🔥 Ошибка в run_polling. Перезапуск через 15 секунд...")
+            time.sleep(15)
 
 
 if __name__ == "__main__":
