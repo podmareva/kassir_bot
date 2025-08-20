@@ -97,6 +97,15 @@ log = logging.getLogger("cashier")
 conn = psycopg.connect(DATABASE_URL, autocommit=True, sslmode="require", row_factory=dict_row)
 cur  = conn.cursor()
 
+def ensure_conn():
+    global conn, cur
+    try:
+        conn.execute("SELECT 1")
+    except Exception:
+        log.warning("🔄 Восстанавливаю соединение с БД...")
+        conn = psycopg.connect(DATABASE_URL, autocommit=True, sslmode="require", row_factory=dict_row)
+        cur = conn.cursor()
+
 cur.execute("""CREATE TABLE IF NOT EXISTS consents(
   user_id BIGINT PRIMARY KEY,
   accepted_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -159,6 +168,7 @@ for code, p in CATALOG.items():
 
 # -------------------- Utils --------------------
 def set_consent(user_id: int):
+    ensure_conn()
     try:
         cur.execute(
             "INSERT INTO consents(user_id, accepted_at) VALUES(%s, now()) ON CONFLICT DO NOTHING",
@@ -168,16 +178,23 @@ def set_consent(user_id: int):
         log.warning("Ошибка при сохранении согласия: %s", e)
 
 def get_product(code: str) -> Optional[dict]:
-    cur.execute("SELECT * FROM products WHERE code=%s", (code,))
-    return cur.fetchone()
+    ensure_conn()
+    try:
+        cur.execute("SELECT * FROM products WHERE code=%s", (code,))
+        return cur.fetchone()
+    except Exception as e:
+        log.warning("Ошибка при получении продукта: %s", e)
+        return None
 
 def current_price(code: str) -> float:
+    ensure_conn()
     base = float(get_product(code)["price"])
     if PROMO_ACTIVE and code in PROMO_PRICES:
         return float(PROMO_PRICES[code])
     return base
 
 def create_order(user_id: int, code: str) -> int:
+    ensure_conn()
     price = current_price(code)
     cur.execute(
         "INSERT INTO orders(user_id, product_code, amount, status) VALUES(%s,%s,%s,'pending') RETURNING id",
@@ -186,18 +203,22 @@ def create_order(user_id: int, code: str) -> int:
     return cur.fetchone()["id"]
 
 def set_status(order_id: int, status: str):
+    ensure_conn()
     cur.execute("UPDATE orders SET status=%s WHERE id=%s", (status, order_id))
 
 def get_order(order_id: int) -> Optional[dict]:
+    ensure_conn()
     cur.execute("SELECT * FROM orders WHERE id=%s", (order_id,))
     return cur.fetchone()
 
 def get_user_by_order(order_id: int) -> Optional[int]:
+    ensure_conn()
     cur.execute("SELECT user_id FROM orders WHERE id=%s", (order_id,))
     row = cur.fetchone()
     return row["user_id"] if row else None
     
 def gen_tokens_with_ttl(user_id: int, targets: list[str], ttl_hours: int):
+    ensure_conn()
     links = []
     expires_at = datetime.utcnow() + timedelta(hours=ttl_hours) if ttl_hours > 0 else None
     for bot_name in targets:
@@ -254,6 +275,7 @@ async def send_examples_screens(ctx, chat_id: int):
 
 # ----- Напоминания об окончании акции (T-48/T-24) -----
 def get_audience_user_ids() -> list[int]:
+    ensure_conn()
     cur.execute("SELECT user_id FROM consents")
     return [r["user_id"] for r in cur.fetchall()]
 
@@ -474,17 +496,21 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 # 6. Сообщаем админу, что всё прошло успешно
                 await q.edit_message_caption(caption=f"✅ Доступ по заказу #{order_id} успешно выдан пользователю {user_id}.")
             except Exception as e:
+                log.exception("Ошибка в cb, data=%s", data)
                 log.error(f"Не удалось отправить ссылки пользователю {user_id} по заказу #{order_id}: {e}")
                 await q.edit_message_caption(caption=f"❌ Ошибка при выдаче доступа по заказу #{order_id}. Пользователю {user_id} не удалось отправить сообщение. Проверьте логи.")
             
             return
             
     except Exception as e:
-        log.exception("Ошибка в обработчике колбэков (cb)")
+        print(f"[cb] Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
         try:
             await safe_edit(q, "Ой, что-то пошло не так. Попробуйте снова или нажмите /start")
         except Exception:
             pass
+
 
 async def receipts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
