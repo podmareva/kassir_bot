@@ -2,6 +2,7 @@ import os, json, secrets, logging, hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
+import urllib.parse 
 
 import psycopg
 from psycopg.rows import dict_row
@@ -169,21 +170,25 @@ def generate_robokassa_link(order_id: int, amount: float, description: str) -> s
     password_1 = ROBOKASSA_PASSWORD_1
     
     # Формируем строку для хеширования
-    # :shp_item=... - можно добавить доп. параметры
     signature_string = f"{merchant_login}:{amount}:{order_id}:{password_1}"
     
     # Создаем MD5 хеш
     signature_hash = hashlib.md5(signature_string.encode('utf-8')).hexdigest()
     
-    # Формируем URL
-    payment_url = (
-        f"https://auth.robokassa.ru/Merchant/Index.aspx?"
-        f"MerchantLogin={merchant_login}&"
-        f"OutSum={amount}&"
-        f"InvId={order_id}&"
-        f"Description={description}&"
-        f"SignatureValue={signature_hash}"
-    )
+    # Собираем параметры в словарь
+    params = {
+        "MerchantLogin": merchant_login,
+        "OutSum": amount,
+        "InvId": order_id,
+        "Description": description,
+        "SignatureValue": signature_hash
+    }
+    
+    # Используем urlencode для правильного формирования строки запроса
+    query_string = urllib.parse.urlencode(params)
+    
+    # Формируем итоговый URL
+    payment_url = f"https://auth.robokassa.ru/Merchant/Index.aspx?{query_string}"
     
     return payment_url
 
@@ -342,7 +347,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(
                 chat_id=uid,
                 text=(
-                    "🎁 <b>Спеццены только 3 дня(до 17.08.2025 включительно):</b>\n\n"
+                    "🎁 <b>Спеццены только до 1 сентября:</b>\n\n"
                     "🛠 <b>Отдельные боты</b>\n"
                     "• Распаковка + Анализ ЦА — <s>2 990 ₽</s> → <b>1 890 ₽</b>\n"
                     "• Контент-помощник — <s>5 490 ₽</s> → <b>2 490 ₽</b>\n\n"
