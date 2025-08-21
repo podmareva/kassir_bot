@@ -2,7 +2,8 @@ import os, json, secrets, logging, hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
-import urllib.parse 
+import urllib.parse
+import threading
 
 import psycopg
 from psycopg.rows import dict_row
@@ -15,9 +16,10 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
+from flask import Flask, request
 
 import logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger("cashier")
 
 async def safe_edit(q, text: str, **kwargs):
@@ -109,7 +111,6 @@ def ensure_conn():
         conn = psycopg.connect(DATABASE_URL, autocommit=True, sslmode="require", row_factory=dict_row)
         cur = conn.cursor()
 
-# Изменили статус по умолчанию на 'pending' и добавили 'awaiting_payment'
 cur.execute("""CREATE TABLE IF NOT EXISTS consents(
   user_id BIGINT PRIMARY KEY,
   accepted_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -128,7 +129,6 @@ cur.execute("""CREATE TABLE IF NOT EXISTS orders(
   status TEXT NOT NULL DEFAULT 'pending',  -- pending/awaiting_payment/paid/rejected
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );""")
-# Таблица receipts больше не нужна, но не будем ее удалять, чтобы не сломать старые данные
 cur.execute("""CREATE TABLE IF NOT EXISTS tokens(
   token TEXT PRIMARY KEY,
   bot_name TEXT NOT NULL,
@@ -147,7 +147,6 @@ cur.execute("""CREATE TABLE IF NOT EXISTS invoice_requests(
   requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   closed BOOLEAN NOT NULL DEFAULT FALSE
 );""")
-
 
 # Каталог базовых цен
 CATALOG = {
@@ -256,7 +255,6 @@ def gen_tokens_with_ttl(user_id: int, targets: list[str], ttl_hours: int):
     return links
 
 def shop_keyboard():
-    # Убрали кнопку "Загрузить чек"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Оплатить бота «Распаковка + Анализ ЦА»",         callback_data="buy:unpack")],
         [InlineKeyboardButton("Оплатить бота «Твой личный контент-помощник»",   callback_data="buy:copy")],
@@ -343,7 +341,6 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             await send_examples_screens(ctx, uid)
             
-            # Текст с ценами можно оставить
             await ctx.bot.send_message(
                 chat_id=uid,
                 text=(
@@ -382,11 +379,10 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             order_id = create_order(uid, code)
             price = current_price(code)
             
-            # Генерируем ссылку на оплату через Робокассу
             payment_link = generate_robokassa_link(
                 order_id=order_id,
                 amount=price,
-                description=prod['title'].replace('"', '') # Убираем кавычки из описания
+                description=prod['title'].replace('"', '')
             )
 
             set_status(order_id, "awaiting_payment")
@@ -396,7 +392,6 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💳 Оплатить через Робокассу", url=payment_link)],
-                [InlineKeyboardButton("✅ Я оплатил(а)", callback_data=f"check_payment:{order_id}")],
                 [InlineKeyboardButton("◀️ Назад к списку", callback_data="go_shop")]
             ])
 
@@ -409,79 +404,6 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        if data.startswith("check_payment:"):
-            order_id = int(data.split(":", 1)[1])
-            order = get_order(order_id)
-            if not order or order['user_id'] != uid:
-                await q.edit_message_text("Заказ не найден.")
-                return
-
-            if order['status'] == 'paid':
-                 await q.edit_message_text("✅ Этот заказ уже оплачен. Ваши ссылки были отправлены ранее.")
-                 return
-            
-            # Отправляем уведомление админу для ручной проверки
-            kb_admin = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{order_id}"),
-                    InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{order_id}")
-                ]
-            ])
-            
-            await ctx.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=(
-                    f"🔔 Пользователь <a href=\"tg://user?id={uid}\">{uid}</a> нажал 'Я оплатил(а)' "
-                    f"по заказу #{order_id}.\n\n"
-                    "Пожалуйста, проверьте поступление средств в ЛК Робокассы и подтвердите заказ."
-                ),
-                reply_markup=kb_admin,
-                parse_mode="HTML"
-            )
-
-            await q.edit_message_text("✅ Спасибо! Мы получили ваше уведомление. Администратор скоро проверит платеж и, в случае успеха, я пришлю вам доступы.")
-            return
-
-        if data.startswith("confirm:"):
-            order_id = int(data.split(":", 1)[1])
-            
-            order = get_order(order_id)
-            if not order:
-                await q.edit_message_text(f"⚠️ Заказ #{order_id} не найден в базе.")
-                return
-
-            set_status(order_id, "paid")
-            
-            product = get_product(order["product_code"])
-            if not product:
-                await q.edit_message_text(f"⚠️ Продукт '{order['product_code']}' для заказа #{order_id} не найден.")
-                return
-
-            user_id = order["user_id"]
-            targets = product["targets"]
-            links = gen_tokens_with_ttl(user_id, targets, TOKEN_TTL_HOURS)
-
-            link_lines = "\n".join([f"➡️ <a href='{link}'>{bot_name}</a>" for bot_name, link in links])
-            
-            try:
-                await ctx.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        "✅ Оплата подтверждена!\n\n"
-                        "Вот ваши персональные ссылки для доступа к ботам:\n\n"
-                        f"{link_lines}\n\n"
-                        f"⚠️ <b>Важно:</b> Ссылки действительны в течение {TOKEN_TTL_HOURS} часов. "
-                        "Обязательно перейдите по ним и запустите ботов, чтобы доступ сохранился навсегда."
-                    ),
-                    parse_mode="HTML",
-                    disable_web_page_preview=True
-                )
-                await safe_edit(q, f"✅ Доступ по заказу #{order_id} успешно выдан пользователю {user_id}.")
-            except Exception as e:
-                log.error(f"Не удалось отправить ссылки пользователю {user_id} по заказу #{order_id}: {e}")
-                await safe_edit(q, f"❌ Ошибка при выдаче доступа по заказу #{order_id}. Пользователю {user_id} не удалось отправить сообщение. Проверьте логи.")
-            return
-            
     except Exception as e:
         log.exception("Ошибка в cb, data=%s", data)
         try:
@@ -492,7 +414,6 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # --- Админские команды и прочее ---
 
 async def fallback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Эта команда будет срабатывать на любые текстовые сообщения, кроме команд
     await update.message.reply_text(
         "Я принимаю оплату и выдаю доступы. Для начала работы нажмите /start.\n\n"
         "Если у вас возник вопрос по оплате или работе ботов, напишите администратору."
@@ -508,12 +429,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(cb))
     
-    # Админские хендлеры для получения file_id
     app.add_handler(CommandHandler("vnote", help_vnote))
     app.add_handler(MessageHandler(filters.VIDEO_NOTE & filters.User(ADMIN_ID), detect_vnote))
     app.add_handler(CommandHandler("photoid", cmd_photoid))
 
-    # Обработчик для любых текстовых сообщений, которые не являются командами
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
 
     while True:
@@ -548,6 +467,62 @@ async def cmd_photoid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await m.reply_text("Пришлите фото или ответьте на него командой /photoid.")
 
+# -------------------- Robokassa Webhook Server --------------------
+app_flask = Flask(__name__)
+
+@app_flask.route('/robokassa_result', methods=['POST'])
+def robokassa_result_handler():
+    try:
+        data = request.form
+        log.info(f"Получен POST-запрос от Робокассы: {data}")
+        
+        signature_string = f"{data['OutSum']}:{data['InvId']}:{ROBOKASSA_PASSWORD_2}"
+        signature_hash = hashlib.md5(signature_string.encode('utf-8')).hexdigest()
+
+        if signature_hash.lower() == data['SignatureValue'].lower():
+            order_id = int(data['InvId'])
+            set_status(order_id, "paid")
+            
+            ctx = Application.builder().token(BOT_TOKEN).build().bot
+            
+            order = get_order(order_id)
+            if order:
+                product = get_product(order["product_code"])
+                if product:
+                    user_id = order["user_id"]
+                    targets = product["targets"]
+                    links = gen_tokens_with_ttl(user_id, targets, TOKEN_TTL_HOURS)
+
+                    link_lines = "\n".join([f"➡️ <a href='{link}'>{bot_name}</a>" for bot_name, link in links])
+                    
+                    ctx.send_message(
+                        chat_id=user_id,
+                        text=(
+                            "✅ Оплата подтверждена!\n\n"
+                            "Вот ваши персональные ссылки для доступа к ботам:\n\n"
+                            f"{link_lines}\n\n"
+                            f"⚠️ <b>Важно:</b> Ссылки действительны в течение {TOKEN_TTL_HOURS} часов. "
+                            "Обязательно перейдите по ним и запустите ботов, чтобы доступ сохранился навсегда."
+                        ),
+                        parse_mode="HTML",
+                        disable_web_page_preview=True
+                    )
+                    ctx.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"✅ Заказ #{order_id} был успешно оплачен пользователем <a href='tg://user?id={user_id}'>{user_id}</a>.",
+                        parse_mode="HTML"
+                    )
+            return "OK"
+        else:
+            log.warning("❌ Неверная подпись в уведомлении от Робокассы.")
+            return "Bad signature", 403
+    except Exception as e:
+        log.error(f"🔥 Ошибка при обработке уведомления Робокассы: {e}", exc_info=True)
+        return "Internal Server Error", 500
 
 if __name__ == "__main__":
+    # Запускаем веб-сервер в отдельном потоке
+    threading.Thread(target=app_flask.run, kwargs={'host': '0.0.0.0', 'port': int(os.getenv("PORT"))}).start()
+    
+    # Запускаем основной бот
     main()
